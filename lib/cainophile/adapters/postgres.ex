@@ -63,7 +63,11 @@ defmodule Cainophile.Adapters.Postgres do
 
   @impl true
   def handle_call({:subscribe, receiver_pid}, _from, state) when is_pid(receiver_pid) do
-    subscribers = [receiver_pid | state.subscribers]
+    subscribers = if receiver_pid in state.subscribers do
+      state.subscribers
+    else
+      [receiver_pid | state.subscribers]
+    end
 
     {:reply, {:ok, subscribers}, %{state | subscribers: subscribers}}
   end
