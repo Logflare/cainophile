@@ -192,11 +192,11 @@ defmodule Cainophile.Adapters.Postgres do
 
   # Client
 
-  def subscribe(pid, receiver_pid) when is_pid(receiver_pid) do
-    GenServer.call(pid, {:subscribe, receiver_pid})
+  def subscribe(pid, receiver_pid, timeout \\ 5_000) when is_pid(receiver_pid) do
+    GenServer.call(pid, {:subscribe, receiver_pid}, timeout)
   end
 
-  def subscribe(pid, receiver_fun) when is_function(receiver_fun) do
+  def subscribe(pid, receiver_fun, timeout \\ 5_000) when is_function(receiver_fun) do
     GenServer.call(pid, {:subscribe, receiver_fun})
   end
 end
