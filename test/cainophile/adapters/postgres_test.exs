@@ -245,6 +245,75 @@ defmodule Cainophile.Adapters.PostgresTest do
     end
   end
 
+  describe "Inactivity flush behavior" do
+    test "flushes after 500ms of inactivity", %{processor: processor} do
+      test_runner_pid = self()
+
+      expect(PostgresMock, :acknowledge_lsn, fn connection, lsn_tup ->
+        assert connection == test_runner_pid
+        send(test_runner_pid, {:flush_acknowledged, connection, lsn_tup})
+        :ok
+      end)
+
+      # Wait for 500ms of inactivity to trigger flush
+      assert_receive({:flush_acknowledged, ^test_runner_pid, _lsn_tup}, 1000)
+    end
+
+    test "resets timer when transaction is received", %{processor: processor} do
+      test_runner_pid = self()
+
+      # Set up expectation for flush after timer reset
+      expect(PostgresMock, :acknowledge_lsn, 2, fn connection, lsn_tup ->
+        assert connection == test_runner_pid
+        send(test_runner_pid, {:flush_acknowledged, connection, lsn_tup})
+        :ok
+      end)
+
+      # Send a transaction after 300ms (should reset timer)
+      Process.send_after(self(), :send_transaction, 300)
+
+      receive do
+        :send_transaction ->
+          # Send transaction to reset the timer
+          for msg <- generate_insert_transaction(), do: send(processor, msg)
+      end
+
+      # First flush should happen from the transaction commit
+      assert_receive({:flush_acknowledged, ^test_runner_pid, _lsn_tup}, 200)
+
+      # Second flush should happen 500ms after the transaction (timer reset)
+      assert_receive({:flush_acknowledged, ^test_runner_pid, _lsn_tup}, 700)
+    end
+
+    test "does not flush if transactions keep coming within 500ms", %{processor: processor} do
+      test_runner_pid = self()
+
+      # Expect acknowledge_lsn to be called only for transaction commits, not inactivity flushes
+      expect(PostgresMock, :acknowledge_lsn, 3, fn connection, lsn_tup ->
+        assert connection == test_runner_pid
+        send(test_runner_pid, {:transaction_acknowledged, connection, lsn_tup})
+        :ok
+      end)
+
+      # Send transactions every 300ms for 1 second total
+      for i <- 1..3 do
+        Process.send_after(self(), {:send_transaction, i}, i * 300)
+      end
+
+      # Receive and send all transactions
+      for i <- 1..3 do
+        receive do
+          {:send_transaction, ^i} ->
+            for msg <- generate_insert_transaction(), do: send(processor, msg)
+            assert_receive({:transaction_acknowledged, ^test_runner_pid, _lsn_tup}, 200)
+        end
+      end
+
+      # Wait additional 300ms - no inactivity flush should occur
+      refute_receive({:transaction_acknowledged, ^test_runner_pid, _lsn_tup}, 400)
+    end
+  end
+
   test "calls cleanup when GenServer terminates", %{processor: processor} do
     test_runner_pid = self()
 
@@ -278,6 +347,20 @@ defmodule Cainophile.Adapters.PostgresTest do
 
   defp generate_epgsql_message(binary) do
     {:epgsql, self(), {:x_log_data, 0, 0, binary}}
+  end
+
+  describe "fetch_current_wal_lsn user config" do
+    alias Cainophile.Adapters.Postgres.EpgsqlImplementation
+
+    test "uses user-provided fetch_current_wal_lsn function when configured" do
+      user_function = fn ->
+        {:ok, {1, 123_456}}
+      end
+
+      config = [fetch_current_wal_lsn: user_function]
+
+      assert {:ok, {1, 123_456}} = EpgsqlImplementation.fetch_current_wal_lsn(config)
+    end
   end
 
   defp create_mocks(ctx) do
