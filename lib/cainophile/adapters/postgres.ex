@@ -58,13 +58,12 @@ defmodule Cainophile.Adapters.Postgres do
   def handle_info({:EXIT, _pid, reason}, state) do
     Logger.debug("Received EXIT signal with reason: #{inspect(reason)}")
 
-    conn =
-      if state.connection do
-        adapter_impl(state.config).cleanup(state.connection)
-        nil
-      else
-        state.connection
-      end
+    conn = if state.connection do
+      adapter_impl(state.config).cleanup(state.connection)
+      nil
+    else
+      state.connection
+    end
 
     # redact state
     {:stop, reason, %{state | connection: conn, config: %{state.config | password: nil}}}
@@ -80,12 +79,11 @@ defmodule Cainophile.Adapters.Postgres do
 
   @impl true
   def handle_call({:subscribe, receiver_pid}, _from, state) when is_pid(receiver_pid) do
-    subscribers =
-      if receiver_pid in state.subscribers do
-        state.subscribers
-      else
-        [receiver_pid | state.subscribers]
-      end
+    subscribers = if receiver_pid in state.subscribers do
+      state.subscribers
+    else
+      [receiver_pid | state.subscribers]
+    end
 
     {:reply, {:ok, subscribers}, %{state | subscribers: subscribers}}
   end
@@ -218,7 +216,6 @@ defmodule Cainophile.Adapters.Postgres do
   # Client
 
   def subscribe(pid, receiver_pid, timeout \\ 5_000)
-
   def subscribe(pid, receiver_pid, timeout) when is_pid(receiver_pid) do
     GenServer.call(pid, {:subscribe, receiver_pid}, timeout)
   end
