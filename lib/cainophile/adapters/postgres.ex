@@ -41,6 +41,7 @@ defmodule Cainophile.Adapters.Postgres do
 
   @impl true
   def init(config) do
+    Process.flag(:trap_exit, true)
     adapter_impl(config).init(config)
   end
 
@@ -51,6 +52,12 @@ defmodule Cainophile.Adapters.Postgres do
     Logger.debug("Decoded message: " <> inspect(decoded, limit: :infinity))
 
     {:noreply, process_message(decoded, state)}
+  end
+
+  @impl true
+  def handle_info({:EXIT, _pid, reason}, state) do
+    Logger.debug("Received EXIT signal with reason: #{inspect(reason)}")
+    {:stop, reason, state}
   end
 
   @impl true
@@ -77,6 +84,11 @@ defmodule Cainophile.Adapters.Postgres do
     subscribers = [receiver_fun | state.subscribers]
 
     {:reply, {:ok, subscribers}, %{state | subscribers: subscribers}}
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    adapter_impl(state.config).cleanup(state.connection)
   end
 
   defp process_message(%Begin{} = msg, state) do

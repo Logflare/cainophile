@@ -3,4 +3,6 @@ defmodule Cainophile.Adapters.Postgres.AdapterBehaviour do
               {:ok, %Cainophile.Adapters.Postgres.State{}} | {:stop, reason :: binary}
 
   @callback acknowledge_lsn(connection :: pid, {xlog :: integer, offset :: integer}) :: :ok
+
+  @callback cleanup(connection :: pid) :: :ok
 end

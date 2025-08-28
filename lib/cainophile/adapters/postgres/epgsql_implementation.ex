@@ -45,6 +45,11 @@ defmodule Cainophile.Adapters.Postgres.EpgsqlImplementation do
     :epgsql.standby_status_update(epgsql, decimal_lsn, decimal_lsn)
   end
 
+  @impl true
+  def cleanup(epgsql_pid) do
+    :epgsql.close(epgsql_pid)
+  end
+
   defp lsn_tuple_to_decimal({xlog, offset}) do
     <<decimal_lsn::integer-64>> = <<xlog::integer-32, offset::integer-32>>
     decimal_lsn

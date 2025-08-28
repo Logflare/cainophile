@@ -245,6 +245,21 @@ defmodule Cainophile.Adapters.PostgresTest do
     end
   end
 
+  test "calls cleanup when GenServer terminates", %{processor: processor} do
+    test_runner_pid = self()
+
+    expect(PostgresMock, :cleanup, fn connection ->
+      assert connection == test_runner_pid
+      send(test_runner_pid, {:cleanup_called, connection})
+      :ok
+    end)
+
+    # Terminate the GenServer
+    Process.exit(processor, :some_signal)
+
+    assert_receive({:cleanup_called, ^test_runner_pid})
+  end
+
   defp generate_insert_transaction() do
     for bin <- @insert_txn_bins, do: generate_epgsql_message(bin)
   end
