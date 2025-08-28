@@ -57,6 +57,10 @@ defmodule ExampleApp.Application do
           database: "yourdb",
           password: "yourpassword"
         },
+        # optional, function to fetch the current wal lsn if you want to avoid creating a new postgres connection each time it is flushed
+        fetch_current_wal_lsn: fn -> {:ok, {0, 0}} end,
+        # optional, defaults to 5_000 (5s)
+        wal_flush_timeout: 15_000,
         slot: "example", # :temporary is also supported if you don't want Postgres keeping track of what you've acknowledged
         wal_position: {"0", "0"}, # You can provide a different WAL position if desired, or default to allowing Postgres to send you what it thinks you need
         publications: ["example_publication"]

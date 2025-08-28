@@ -7,9 +7,12 @@ defmodule Cainophile.Adapters.Postgres do
         subscribers: [],
         transaction: nil,
         relations: %{},
-        types: %{}
+        types: %{},
+        flush_timer_ref: nil
       )
   )
+
+  @flush_interval if Mix.env() == :test, do: 500, else: 5_000
 
   use GenServer
   require Logger
@@ -42,7 +45,16 @@ defmodule Cainophile.Adapters.Postgres do
   @impl true
   def init(config) do
     Process.flag(:trap_exit, true)
-    adapter_impl(config).init(config)
+
+    case adapter_impl(config).init(config) do
+      {:ok, state} ->
+        interval = Keyword.get(config, :wal_flush_timeout, @flush_interval)
+        timer_ref = schedule_flush_timer(interval)
+        {:ok, %{state | flush_timer_ref: timer_ref}}
+
+      error ->
+        error
+    end
   end
 
   @impl true
@@ -51,22 +63,37 @@ defmodule Cainophile.Adapters.Postgres do
     Logger.debug("Received binary message: #{inspect(binary_msg, limit: :infinity)}")
     Logger.debug("Decoded message: " <> inspect(decoded, limit: :infinity))
 
-    {:noreply, process_message(decoded, state)}
+    new_state = process_message(decoded, state)
+    {:noreply, reset_flush_timer(new_state)}
+  end
+
+  def handle_info(:flush_timeout, state) do
+    Logger.debug("Flush timeout triggered - fetching current WAL LSN and flushing")
+
+    new_state =
+      case adapter_impl(state.config).fetch_current_wal_lsn(state.config) do
+        {:ok, current_lsn} ->
+          Logger.debug("Fetched current WAL LSN: #{inspect(current_lsn)} - acknowledging")
+          :ok = adapter_impl(state.config).acknowledge_lsn(state.connection, current_lsn)
+          state
+
+        {:error, reason} ->
+          Logger.warn("Failed to fetch current WAL LSN: #{inspect(reason)}")
+          state
+      end
+
+    interval = Keyword.get(state.config, :wal_flush_timeout, @flush_interval)
+    timer_ref = schedule_flush_timer(interval)
+    {:noreply, %{new_state | flush_timer_ref: timer_ref}}
   end
 
   @impl true
-  def handle_info({:EXIT, _pid, reason}, state) do
-    Logger.debug("Received EXIT signal with reason: #{inspect(reason)}")
+  def handle_info({:EXIT, pid, reason}, state) do
+    Logger.debug(
+      "#{inspect(self())} Received EXIT signal for #{inspect(pid)} with reason: #{inspect(reason)}"
+    )
 
-    conn = if state.connection do
-      adapter_impl(state.config).cleanup(state.connection)
-      nil
-    else
-      state.connection
-    end
-
-    # redact state
-    {:stop, reason, %{state | connection: conn, config: %{state.config | password: nil}}}
+    {:noreply, state}
   end
 
   @impl true
@@ -79,11 +106,12 @@ defmodule Cainophile.Adapters.Postgres do
 
   @impl true
   def handle_call({:subscribe, receiver_pid}, _from, state) when is_pid(receiver_pid) do
-    subscribers = if receiver_pid in state.subscribers do
-      state.subscribers
-    else
-      [receiver_pid | state.subscribers]
-    end
+    subscribers =
+      if receiver_pid in state.subscribers do
+        state.subscribers
+      else
+        [receiver_pid | state.subscribers]
+      end
 
     {:reply, {:ok, subscribers}, %{state | subscribers: subscribers}}
   end
@@ -213,9 +241,24 @@ defmodule Cainophile.Adapters.Postgres do
     Keyword.get(config, :postgres_adapter, Cainophile.Adapters.Postgres.EpgsqlImplementation)
   end
 
+  defp schedule_flush_timer(interval) do
+    Process.send_after(self(), :flush_timeout, interval)
+  end
+
+  defp reset_flush_timer(state) do
+    if state.flush_timer_ref do
+      Process.cancel_timer(state.flush_timer_ref)
+    end
+
+    interval = Keyword.get(state.config, :wal_flush_timeout, @flush_interval)
+    timer_ref = schedule_flush_timer(interval)
+    %{state | flush_timer_ref: timer_ref}
+  end
+
   # Client
 
   def subscribe(pid, receiver_pid, timeout \\ 5_000)
+
   def subscribe(pid, receiver_pid, timeout) when is_pid(receiver_pid) do
     GenServer.call(pid, {:subscribe, receiver_pid}, timeout)
   end

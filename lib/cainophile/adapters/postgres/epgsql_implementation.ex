@@ -3,6 +3,8 @@ defmodule Cainophile.Adapters.Postgres.EpgsqlImplementation do
 
   alias Cainophile.Adapters.Postgres.State
 
+  require Logger
+
   @impl true
   def init(config) do
     epgsql_config =
@@ -46,6 +48,32 @@ defmodule Cainophile.Adapters.Postgres.EpgsqlImplementation do
   end
 
   @impl true
+  def fetch_current_wal_lsn(config) do
+    epgsql_config = Keyword.get(config, :epgsql, %{})
+
+    if user_fetch_current_wal_lsn = Keyword.get(config, :fetch_current_wal_lsn) do
+      user_fetch_current_wal_lsn.()
+    else
+      default_fetch_current_wal_lsn(epgsql_config)
+    end
+  end
+
+  defp default_fetch_current_wal_lsn(epgsql_config) do
+    {:ok, epgsql_pid} = :epgsql.connect(epgsql_config)
+
+    with {:ok, _, [{lsn_string}]} <- :epgsql.squery(epgsql_pid, "SELECT pg_current_wal_lsn()"),
+         {:ok, lsn_tuple} <- parse_lsn_string(lsn_string),
+         _ <- :epgsql.close(epgsql_pid) do
+      {:ok, lsn_tuple}
+    else
+      {:error, reason} ->
+        Logger.debug("Error fetching current wal lsn: #{inspect(reason)}")
+        :epgsql.close(epgsql_pid)
+        {:error, reason}
+    end
+  end
+
+  @impl true
   def cleanup(epgsql_pid) do
     :epgsql.close(epgsql_pid)
   end
@@ -53,6 +81,23 @@ defmodule Cainophile.Adapters.Postgres.EpgsqlImplementation do
   defp lsn_tuple_to_decimal({xlog, offset}) do
     <<decimal_lsn::integer-64>> = <<xlog::integer-32, offset::integer-32>>
     decimal_lsn
+  end
+
+  @spec parse_lsn_string(String.t()) ::
+          {:ok, {integer(), integer()}} | {:error, :invalid_lsn_format}
+  def parse_lsn_string(lsn_string) do
+    case String.split(lsn_string, "/") do
+      [xlog_str, offset_str] ->
+        with {xlog, ""} <- Integer.parse(xlog_str, 16),
+             {offset, ""} <- Integer.parse(offset_str, 16) do
+          {:ok, {xlog, offset}}
+        else
+          _ -> {:error, :invalid_lsn_format}
+        end
+
+      _ ->
+        {:error, :invalid_lsn_format}
+    end
   end
 
   defp create_replication_slot(epgsql_pid, slot) do
