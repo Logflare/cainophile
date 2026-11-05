@@ -31,15 +31,24 @@ defmodule Cainophile.Adapters.Postgres do
     Delete,
     Truncate,
     Type,
-    Origin
+    Origin,
+    Unsupported
   }
+
+  @doc """
+  Returns a child spec whose start arguments already hide the `epgsql` password, so the
+  supervisor never stores it in plain text.
+  """
+  def child_spec(config) do
+    config
+    |> hide_epgsql_password()
+    |> super()
+  end
 
   def start_link(config) do
     register = Keyword.get(config, :register)
 
-    config = Keyword.update(config, :epgsql, %{}, &hide_password/1)
-
-    GenServer.start_link(__MODULE__, config, name: register)
+    GenServer.start_link(__MODULE__, hide_epgsql_password(config), name: register)
   end
 
   @impl true
@@ -58,18 +67,14 @@ defmodule Cainophile.Adapters.Postgres do
   end
 
   @impl true
-  def handle_info({:EXIT, _pid, reason}, state) do
-    Logger.debug("Received EXIT signal")
+  def handle_info({:EXIT, pid, reason}, %State{connection: pid} = state) do
+    Logger.debug("Connection #{inspect(pid)} exited: #{inspect(reason_tag(reason))}")
+    {:stop, reason, %{state | connection: nil}}
+  end
 
-    conn =
-      if state.connection do
-        adapter_impl(state.config).cleanup(state.connection)
-        nil
-      else
-        state.connection
-      end
-
-    {:stop, reason, redact_state(%{state | connection: conn})}
+  def handle_info({:EXIT, pid, reason}, state) do
+    Logger.debug("Linked process #{inspect(pid)} exited: #{inspect(reason_tag(reason))}")
+    {:stop, reason, state}
   end
 
   @impl true
@@ -79,19 +84,51 @@ defmodule Cainophile.Adapters.Postgres do
   end
 
   @impl true
+  def format_status(:terminate, [_process_dictionary, state]), do: redact_state(state)
+
   def format_status(_reason, [_process_dictionary, state]) do
     [data: [{"State", redact_state(state)}]]
   end
 
-  defp hide_password(%{password: password} = options) when not is_function(password, 0) do
-    %{options | password: fn -> password end}
+  defp reason_tag(reason) when is_atom(reason), do: reason
+  defp reason_tag(reason) when is_tuple(reason) and tuple_size(reason) > 0, do: elem(reason, 0)
+  defp reason_tag(_reason), do: :other
+
+  defp hide_epgsql_password(config) do
+    case Keyword.fetch(config, :epgsql) do
+      {:ok, options} -> Keyword.put(config, :epgsql, hide_password(options))
+      :error -> config
+    end
   end
 
-  defp hide_password(options), do: options
+  defp hide_password(options) when is_map(options),
+    do: :epgsql_cmd_connect.opts_hide_password(options)
 
-  defp redact_state(%State{config: config} = state) do
-    %{state | config: Keyword.update(config, :epgsql, %{}, &Map.delete(&1, :password))}
+  defp hide_password(options) when is_list(options) do
+    case :proplists.lookup(:password, options) do
+      {:password, password} ->
+        [
+          {:password, :epgsql_cmd_connect.hide_password(password)}
+          | :proplists.delete(:password, options)
+        ]
+
+      :none ->
+        options
+    end
   end
+
+  defp redact_state(%State{config: config} = state) when is_list(config) do
+    case Keyword.fetch(config, :epgsql) do
+      {:ok, options} -> %{state | config: Keyword.put(config, :epgsql, drop_password(options))}
+      :error -> state
+    end
+  end
+
+  defp redact_state(state), do: state
+
+  defp drop_password(options) when is_map(options), do: Map.delete(options, :password)
+  defp drop_password(options) when is_list(options), do: :proplists.delete(:password, options)
+  defp drop_password(options), do: options
 
   # TODO: Extract subscription logic into common module for other adapters
 
@@ -143,7 +180,17 @@ defmodule Cainophile.Adapters.Postgres do
   # TODO: do something more intelligent here
   defp process_message(%Type{}, state), do: state
 
+  defp process_message(%Origin{name: name}, %State{transaction: {lsn, txn}} = state) do
+    [origin | _] = :binary.split(name, <<0>>)
+    %{state | transaction: {lsn, %{txn | origin: origin}}}
+  end
+
   defp process_message(%Origin{}, state), do: state
+
+  defp process_message(%Unsupported{data: data}, state) do
+    Logger.warning("Skipping unsupported pgoutput message type #{inspect(message_type(data))}")
+    state
+  end
 
   defp process_message(%Relation{} = msg, state) do
     %{state | relations: Map.put(state.relations, msg.id, msg)}
@@ -211,6 +258,9 @@ defmodule Cainophile.Adapters.Postgres do
       | transaction: {lsn, %{txn | changes: Enum.reverse(truncated_relations ++ txn.changes)}}
     }
   end
+
+  defp message_type(<<type, _rest::binary>>), do: <<type>>
+  defp message_type(_data), do: nil
 
   # TODO: Typecast to meaningful Elixir types here later
   defp data_tuple_to_map(_columns, nil), do: %{}

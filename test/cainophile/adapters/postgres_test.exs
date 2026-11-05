@@ -1,6 +1,7 @@
 defmodule Cainophile.Adapters.PostgresTest do
   use ExUnit.Case
   import Mox
+  import ExUnit.CaptureLog
   alias Cainophile.Adapters.{Postgres, Postgres.State}
 
   alias Cainophile.Changes.{
@@ -133,6 +134,7 @@ defmodule Cainophile.Adapters.PostgresTest do
 
       assert_receive(%Transaction{
         commit_timestamp: timestamp,
+        origin: nil,
         changes: [
           %NewRecord{
             relation: {"public", "foo"},
@@ -157,6 +159,7 @@ defmodule Cainophile.Adapters.PostgresTest do
       for msg <- generate_replicated_insert_transaction(), do: send(processor, msg)
 
       assert_receive(%Transaction{
+        origin: "pgl_logflare_provider_logflare",
         changes: [
           %NewRecord{
             relation: {"public", "foo"},
@@ -165,6 +168,22 @@ defmodule Cainophile.Adapters.PostgresTest do
         ]
       })
 
+      assert Process.alive?(processor)
+    end
+
+    test "skips an unsupported message and logs only its type", %{processor: processor} do
+      log =
+        capture_log([level: :warning], fn ->
+          send(processor, generate_epgsql_message(<<?M, "secret-row-data">>))
+          for msg <- generate_insert_transaction(), do: send(processor, msg)
+
+          assert_receive(%Transaction{
+            changes: [%NewRecord{relation: {"public", "foo"}}]
+          })
+        end)
+
+      assert log =~ ~s(unsupported pgoutput message type "M")
+      refute log =~ "secret-row-data"
       assert Process.alive?(processor)
     end
 
