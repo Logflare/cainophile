@@ -246,4 +246,3 @@ defmodule Cainophile.Adapters.Postgres do
     GenServer.call(pid, {:subscribe, receiver_fun}, timeout)
   end
 end
-
