@@ -102,4 +102,3 @@ defmodule Cainophile.Adapters.PostgresSecurityTest do
     )
   end
 end
-
