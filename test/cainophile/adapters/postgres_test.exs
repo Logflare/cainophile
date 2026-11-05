@@ -151,6 +151,23 @@ defmodule Cainophile.Adapters.PostgresTest do
       assert inspect(timestamp) == inspect(expected_dt)
     end
 
+    test "publishes a replicated insert transaction that carries an origin message", %{
+      processor: processor
+    } do
+      for msg <- generate_replicated_insert_transaction(), do: send(processor, msg)
+
+      assert_receive(%Transaction{
+        changes: [
+          %NewRecord{
+            relation: {"public", "foo"},
+            record: %{"bar" => "bazbar123458", "id" => "568", "custom_type" => "(abcdef)"}
+          }
+        ]
+      })
+
+      assert Process.alive?(processor)
+    end
+
     test "publishes insert+update transaction to pid subscribers", %{processor: processor} do
       for msg <- generate_insert_and_update_transaction(), do: send(processor, msg)
 
@@ -262,6 +279,12 @@ defmodule Cainophile.Adapters.PostgresTest do
 
   defp generate_insert_transaction() do
     for bin <- @insert_txn_bins, do: generate_epgsql_message(bin)
+  end
+
+  defp generate_replicated_insert_transaction() do
+    [begin | rest] = @insert_txn_bins
+    origin = <<?O, 3_000_158_480::64>> <> "pgl_logflare_provider_logflare" <> <<0>>
+    for bin <- [begin, origin | rest], do: generate_epgsql_message(bin)
   end
 
   defp generate_insert_and_update_transaction() do
