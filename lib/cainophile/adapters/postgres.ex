@@ -30,7 +30,8 @@ defmodule Cainophile.Adapters.Postgres do
     Update,
     Delete,
     Truncate,
-    Type
+    Type,
+    Origin
   }
 
   def start_link(config) do
@@ -123,6 +124,8 @@ defmodule Cainophile.Adapters.Postgres do
 
   # TODO: do something more intelligent here
   defp process_message(%Type{}, state), do: state
+
+  defp process_message(%Origin{}, state), do: state
 
   defp process_message(%Relation{} = msg, state) do
     %{state | relations: Map.put(state.relations, msg.id, msg)}
