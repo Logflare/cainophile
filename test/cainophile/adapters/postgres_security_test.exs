@@ -50,7 +50,7 @@ defmodule Cainophile.Adapters.PostgresSecurityTest do
     refute_received :password_requested
   end
 
-  test "EXIT cleanup redacts nested passwords without changing the exit reason" do
+  test "EXIT from the connection drops it without cleanup and keeps the exit reason" do
     state = %State{
       config: [postgres_adapter: __MODULE__, epgsql: %{password: @password, username: "dummy"}],
       connection: self()
@@ -59,15 +59,34 @@ defmodule Cainophile.Adapters.PostgresSecurityTest do
     assert {:stop, :econnreset, stopped_state} =
              Postgres.handle_info({:EXIT, self(), :econnreset}, state)
 
-    assert_received :connection_cleaned_up
     assert stopped_state.connection == nil
-    assert stopped_state.config[:epgsql] == %{username: "dummy"}
-    refute inspect(stopped_state) =~ @password
+    Postgres.terminate(:econnreset, stopped_state)
+    refute_received :connection_cleaned_up
   end
 
-  test "EXIT cleanup also accepts configuration without epgsql options" do
+  test "EXIT from another linked process stops, and terminate cleans up the connection once" do
+    other = spawn(fn -> :ok end)
+    state = %State{config: [postgres_adapter: __MODULE__], connection: self()}
+
+    assert {:stop, :killed, stopped_state} = Postgres.handle_info({:EXIT, other, :killed}, state)
+    refute_received :connection_cleaned_up
+
+    Postgres.terminate(:killed, stopped_state)
+    assert_received :connection_cleaned_up
+    refute_received :connection_cleaned_up
+  end
+
+  test "EXIT handling keeps a configuration without epgsql options unchanged" do
     state = %State{config: [postgres_adapter: __MODULE__]}
-    assert {:stop, :normal, _state} = Postgres.handle_info({:EXIT, self(), :normal}, state)
+
+    assert {:stop, :normal, stopped_state} =
+             Postgres.handle_info({:EXIT, self(), :normal}, state)
+
+    assert stopped_state.config == [postgres_adapter: __MODULE__]
+
+    assert Postgres.format_status(:terminate, [[], state]).config == [
+             postgres_adapter: __MODULE__
+           ]
   end
 
   test "status formatting redacts raw passwords without mutating live state" do
@@ -80,13 +99,46 @@ defmodule Cainophile.Adapters.PostgresSecurityTest do
     assert state.config[:epgsql].password == @password
   end
 
+  test "status formatting returns the redacted state itself for terminate" do
+    state = %State{config: [epgsql: %{password: @password, username: "dummy"}]}
+
+    assert %State{config: [epgsql: %{username: "dummy"}]} =
+             Postgres.format_status(:terminate, [[], state])
+
+    assert [data: [{"State", %State{}}]] = Postgres.format_status(:normal, [[], state])
+  end
+
+  test "proplist passwords are hidden at startup and redacted in status" do
+    pid = start_postgres(password: @password, username: "dummy")
+    state = :sys.get_state(pid)
+    password = :proplists.get_value(:password, state.config[:epgsql])
+
+    assert is_function(password, 0)
+    assert password.() == @password
+    assert :proplists.get_value(:username, state.config[:epgsql]) == "dummy"
+    refute inspect(:sys.get_status(pid)) =~ @password
+  end
+
+  test "child_spec/1 hides map and proplist passwords in the start arguments" do
+    for epgsql <- [%{password: @password}, [password: @password]] do
+      %{start: {Postgres, :start_link, [config]}} =
+        Postgres.child_spec(postgres_adapter: __MODULE__, epgsql: epgsql)
+
+      refute inspect(config) =~ @password
+    end
+  end
+
   test "unexpected callback crashes do not log the password" do
     pid = start_postgres(%{password: @password})
     ref = Process.monitor(pid)
 
+    commit_without_begin =
+      <<67, 0, 0, 0, 0, 2, 167, 249, 2, 56, 0, 0, 0, 2, 167, 249, 2, 104, 0, 2, 49, 12, 168, 58,
+        245, 78>>
+
     log =
       capture_log(fn ->
-        send(pid, {:epgsql, self(), {:x_log_data, 0, 0, <<>>}})
+        send(pid, {:epgsql, self(), {:x_log_data, 0, 0, commit_without_begin}})
         assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
       end)
 
